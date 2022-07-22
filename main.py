@@ -38,7 +38,7 @@ FLAG_RESUME_TOKEN = flags.DEFINE_string(
 
 DATABASE = "projects/dconeybe-testing/databases/(default)"
 PARENT = f"{DATABASE}/documents"
-COLLECTION_ID = "WatchDemo"
+COLLECTION_ID = "WatchDemo2"
 
 
 class Command(abc.ABC):
@@ -51,11 +51,11 @@ class Command(abc.ABC):
 class InitializeCommand(Command):
 
   def run(self, stub: firestore_pb2_grpc.FirestoreStub) -> None:
-    for i in range(5):
+    for i in range(3):
       request = firestore_pb2.CreateDocumentRequest(
         parent=PARENT,
         collection_id=COLLECTION_ID,
-        document_id=f"Doc{i}",
+        document_id=f"Doc{i+1}",
         document=document_pb2.Document(
           fields={
             "key": document_pb2.Value(
