@@ -4,6 +4,9 @@ import abc
 import grpc
 import queue
 import re
+import socket
+import socketserver
+import threading
 
 from absl import app
 from absl import flags
@@ -106,10 +109,10 @@ class UpdateDocumentCommand(Command):
     logging.info("Updating document: %s (setting key=%s)", self.document_id, self.value)
     stub.UpdateDocument(request)
 
-
 class ListenCommand(Command):
 
   def run(self, stub: firestore_pb2_grpc.FirestoreStub) -> None:
+
     class ListenRequestIter:
 
       def __init__(self) -> None:
@@ -123,7 +126,36 @@ class ListenCommand(Command):
         logging.info("Sending: ListenRequest:\n%s", request)
         return request
 
+    class RemoteCommandRequestHandler(socketserver.StreamRequestHandler):
+
+      def handle(self):
+        data = self.rfile.read()
+        if data == b"pause":
+          self.send_listen_request(ListenCommand.remove_target_listen_request())
+        elif data == b"resume":
+          self.send_listen_request(ListenCommand.add_target_listen_request())
+        else:
+          logging.warning("Received unknown command: %s", data)
+
+      def send_listen_request(self, request: firestore_pb2.ListenRequest) -> None:
+        self.server.q.enqueue(request)
+
+    class RemoteCommandServer(socketserver.TCPServer):
+
+      def __init__(self, q: ListenRequestIter):
+        super().__init__(("127.0.0.1", 23445), RemoteCommandRequestHandler)
+        self.q = q
+
+      def serve_forever(self, *args, **kwargs):
+        logging.info("Listening on %s", self.server_address)
+        return super().serve_forever(*args, **kwargs)
+
     listen_request_iter = ListenRequestIter()
+    remote_command_server = RemoteCommandServer(q=listen_request_iter)
+    thread = threading.Thread(target=remote_command_server.serve_forever)
+    thread.daemon = True
+    thread.start()
+
     listen_request_iter.enqueue(
       firestore_pb2.ListenRequest(
         database=DATABASE,
@@ -165,6 +197,73 @@ class ListenCommand(Command):
     for listen_response in stub.Listen(listen_request_iter, metadata=metadata):
       logging.info("Received: ListenResponse:\n%s", listen_response)
 
+  @staticmethod
+  def add_target_listen_request() -> firestore_pb2.ListenRequest:
+    return firestore_pb2.ListenRequest(
+      database=DATABASE,
+      add_target=firestore_pb2.Target(
+        target_id=1,
+        query=firestore_pb2.Target.QueryTarget(
+          parent=PARENT,
+          structured_query=query_pb2.StructuredQuery(
+            where=query_pb2.StructuredQuery.Filter(
+              field_filter=query_pb2.StructuredQuery.FieldFilter(
+                field=query_pb2.StructuredQuery.FieldReference(
+                  field_path="key",
+                ),
+                op=query_pb2.StructuredQuery.FieldFilter.Operator.EQUAL,
+                value=document_pb2.Value(
+                  integer_value=42,
+                ),
+              ),
+            ),
+            **{
+              "from": [
+                query_pb2.StructuredQuery.CollectionSelector(
+                  collection_id=COLLECTION_ID,
+                  all_descendants=False,
+                ),
+              ]
+            }
+          ),
+        ),
+      ),
+    )
+
+  @staticmethod
+  def remove_target_listen_request() -> firestore_pb2.ListenRequest:
+    return firestore_pb2.ListenRequest(
+      database=DATABASE,
+      remove_target=1,
+    )
+
+
+class ListenSendCommandRPCCommand(Command):
+
+  def __init__(self, command_name: str, command: bytes) -> None:
+    self.command_name = command_name
+    self.command = command
+
+  def run(self, stub: firestore_pb2_grpc.FirestoreStub) -> None:
+    remote_address = ("127.0.0.1", 23445)
+    with socket.socket() as s:
+      logging.info("Connecting to %s", remote_address)
+      s.connect(remote_address)
+      logging.info("Sending %s command", self.command_name)
+      s.sendall(self.command)
+
+
+class ListenPauseCommand(ListenSendCommandRPCCommand):
+
+  def __init__(self) -> None:
+    super().__init__("PAUSE", b"pause")
+
+
+class ListenResumeCommand(ListenSendCommandRPCCommand):
+
+  def __init__(self) -> None:
+    super().__init__("RESUME", b"resume")
+
 
 def run_command(command: Command) -> None:
   if FLAG_FIRESTORE_EMULATOR.value:
@@ -199,6 +298,10 @@ def main(argv: Sequence[str]) -> None:
     command = UpdateDocumentCommand(document_id=match.group(1), value=int(match.group(2)))
   elif command_str == "listen":
     command = ListenCommand()
+  elif command_str == "pause":
+    command = ListenPauseCommand()
+  elif command_str == "resume":
+    command = ListenResumeCommand()
   else:
     raise app.UsageError(f"unsupported command: {command_str}")
 
