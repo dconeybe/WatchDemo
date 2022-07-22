@@ -110,7 +110,21 @@ class UpdateDocumentCommand(Command):
 class ListenCommand(Command):
 
   def run(self, stub: firestore_pb2_grpc.FirestoreStub) -> None:
-    q = [
+    class ListenRequestIter:
+
+      def __init__(self) -> None:
+        self.queue = queue.Queue()
+
+      def enqueue(self, listen_request: firestore_pb2.ListenRequest) -> None:
+        self.queue.put(listen_request)
+
+      def __next__(self) -> firestore_pb2.ListenRequest:
+        request = self.queue.get()
+        logging.info("Sending: ListenRequest:\n%s", request)
+        return request
+
+    listen_request_iter = ListenRequestIter()
+    listen_request_iter.enqueue(
       firestore_pb2.ListenRequest(
         database=DATABASE,
         add_target=firestore_pb2.Target(
@@ -129,24 +143,50 @@ class ListenCommand(Command):
                   ),
                 ),
               ),
+              **{
+                "from": [
+                  query_pb2.StructuredQuery.CollectionSelector(
+                    collection_id=COLLECTION_ID,
+                    all_descendants=False,
+                  ),
+                ]
+              }
             ),
           ),
         ),
       )
-    ]
+    )
 
-    for listen_response in stub.Listen(iter(q)):
-      logging.info("%s", listen_response)
+    metadata = (
+      ("google-cloud-resource-prefix", DATABASE),
+      ("x-goog-request-params", DATABASE),
+    )
+
+    for listen_response in stub.Listen(listen_request_iter, metadata=metadata):
+      logging.info("Received: ListenResponse:\n%s", listen_response)
+
+
+def run_command(command: Command) -> None:
+  if FLAG_FIRESTORE_EMULATOR.value:
+    logging.info("Connecting to the Firestore Emulator at localhost:8080")
+    grpc_channel = grpc.insecure_channel("localhost:8080")
+  else:
+    logging.info("Connecting to Firestore Prod at firestore.googleapis.com")
+    channel_creds = grpc.ssl_channel_credentials()
+    grpc_channel = grpc.secure_channel("firestore.googleapis.com", channel_creds)
+
+  with grpc_channel:
+    stub = firestore_pb2_grpc.FirestoreStub(grpc_channel)
+    command.run(stub)
 
 
 def main(argv: Sequence[str]) -> None:
   if len(argv) == 1:
     raise app.UsageError("no command specified; supported commands are: init ls set:DocN=999 listen")
-  elif len(argv) == 2:
-    command_str = argv[1]
   elif len(argv) > 2:
     raise app.UsageError(f"unexpected argument: {argv[2]}")
 
+  command_str = argv[1]
   command: Command
   if command_str == "init":
     command = InitializeCommand()
@@ -162,17 +202,7 @@ def main(argv: Sequence[str]) -> None:
   else:
     raise app.UsageError(f"unsupported command: {command_str}")
 
-  if FLAG_FIRESTORE_EMULATOR.value:
-    logging.info("Connecting to the Firestore Emulator at localhost:8080")
-    grpc_channel = grpc.insecure_channel("localhost:8080")
-  else:
-    logging.info("Connecting to Firestore Prod at firestore.googleapis.com")
-    channel_creds = grpc.ssl_channel_credentials()
-    grpc_channel = grpc.secure_channel("firestore.googleapis.com", channel_creds)
-
-  with grpc_channel:
-    stub = firestore_pb2_grpc.FirestoreStub(grpc_channel)
-    command.run(stub)
+  run_command(command)
 
 
 if __name__ == "__main__":
