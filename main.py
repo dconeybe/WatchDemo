@@ -20,6 +20,7 @@ from google.firestore.v1 import document_pb2
 from google.firestore.v1 import firestore_pb2
 from google.firestore.v1 import firestore_pb2_grpc
 from google.firestore.v1 import query_pb2
+from google.firestore.v1 import write_pb2
 
 
 FLAG_FIRESTORE_EMULATOR = flags.DEFINE_boolean(
@@ -160,7 +161,6 @@ class ListenCommand(Command):
 
       resume_token = target_change.resume_token
       if len(resume_token) > 0:
-        logging.info("Updating resume token to: %s", resume_token.hex())
         state.resume_token = resume_token
 
   @staticmethod
@@ -223,6 +223,14 @@ class ListenCommand(Command):
     response_type = response.WhichOneof("response_type")
     if response_type == "target_change":
       return cls.description_from_target_change(response.target_change)
+    elif response_type == "document_change":
+      return cls.description_from_document_change(response.document_change)
+    elif response_type == "document_delete":
+      return cls.description_from_document_delete(response.document_delete)
+    elif response_type == "document_remove":
+      return cls.description_from_document_remove(response.document_remove)
+    elif response_type == "filter":
+      return cls.description_from_existence_filter(response.filter)
     else:
       return f"UNKNOWN response_type: {response_type}"
 
@@ -247,9 +255,72 @@ class ListenCommand(Command):
       if len(target_ids) == 0:
         return "GLOBAL_SNAPSHOT resume_token=" + target_change.resume_token.hex()
       else:
-        return "NO_CHANGE " + + ", ".join(target_ids)
+        return "NO_CHANGE " + ", ".join(target_ids)
     else:
       return f"UNKNOWN target_change_type: {target_change.target_change_type}"
+
+  @classmethod
+  def description_from_document_change(cls, document_change: write_pb2.DocumentChange) -> str:
+    buf = io.StringIO()
+    buf.write("DOC_CHANGE ")
+    document_name = document_change.document.name.split("/")[-1]
+    buf.write(document_name)
+
+    if document_change.target_ids:
+      matching_target_ids = tuple(str(x) for x in sorted(document_change.target_ids))
+      if len(matching_target_ids) == 1:
+        buf.write(f" target_id={matching_target_ids[0]}")
+      else:
+        buf.write(" target_ids=")
+        buf.write(", ".join(matching_target_ids))
+
+    if document_change.removed_target_ids:
+      removed_target_ids = tuple(str(x) for x in sorted(document_change.removed_target_ids))
+      if len(removed_target_ids) == 1:
+        buf.write(f" removed_target_id={removed_target_ids[0]}")
+      else:
+        buf.write(" removed_target_ids=")
+        buf.write(", ".join(removed_target_ids))
+
+    return buf.getvalue()
+
+  @classmethod
+  def description_from_document_delete(cls, document_delete: write_pb2.DocumentDelete) -> str:
+    buf = io.StringIO()
+    buf.write("DOC_DELETE ")
+    document_name = document_delete.document.split("/")[-1]
+    buf.write(document_name)
+
+    if document_delete.removed_target_ids:
+      removed_target_ids = tuple(str(x) for x in sorted(document_delete.removed_target_ids))
+      if len(removed_target_ids) == 1:
+        buf.write(f" removed_target_id={removed_target_ids[0]}")
+      else:
+        buf.write(" removed_target_ids=")
+        buf.write(", ".join(removed_target_ids))
+
+    return buf.getvalue()
+
+  @classmethod
+  def description_from_document_remove(cls, document_remove: write_pb2.DocumentRemove) -> str:
+    buf = io.StringIO()
+    buf.write("DOC_REMOVE ")
+    document_name = document_remove.document.split("/")[-1]
+    buf.write(document_name)
+
+    if document_remove.removed_target_ids:
+      removed_target_ids = tuple(str(x) for x in sorted(document_remove.removed_target_ids))
+      if len(removed_target_ids) == 1:
+        buf.write(f" removed_target_id={removed_target_ids[0]}")
+      else:
+        buf.write(" removed_target_ids=")
+        buf.write(", ".join(removed_target_ids))
+
+    return buf.getvalue()
+
+  @classmethod
+  def description_from_existence_filter(cls, existence_filter: write_pb2.ExistenceFilter) -> str:
+    return f"EXISTENCE_FILTER target_id={existence_filter.target_id} count={existence_filter.count}"
 
   class ListenRequestIter:
 
