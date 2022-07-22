@@ -2,17 +2,28 @@ from collections.abc import Sequence
 
 import abc
 import grpc
+import queue
 import re
 
 from absl import app
+from absl import flags
 from absl import logging
 from google.firestore.v1 import common_pb2
 from google.firestore.v1 import document_pb2
 from google.firestore.v1 import firestore_pb2
 from google.firestore.v1 import firestore_pb2_grpc
+from google.firestore.v1 import query_pb2
 
 
-PARENT = "projects/dconeybe-testing/databases/(default)/documents"
+FLAG_FIRESTORE_EMULATOR = flags.DEFINE_boolean(
+  name="emulator",
+  default=False,
+  help="Whether or not to use the Firestore Emulator; if not using the "
+    "Firestore Emulator, then use prod.",
+)
+
+DATABASE = "projects/dconeybe-testing/databases/(default)"
+PARENT = f"{DATABASE}/documents"
 COLLECTION_ID = "WatchDemo"
 
 
@@ -96,9 +107,41 @@ class UpdateDocumentCommand(Command):
     stub.UpdateDocument(request)
 
 
+class ListenCommand(Command):
+
+  def run(self, stub: firestore_pb2_grpc.FirestoreStub) -> None:
+    q = [
+      firestore_pb2.ListenRequest(
+        database=DATABASE,
+        add_target=firestore_pb2.Target(
+          target_id=1,
+          query=firestore_pb2.Target.QueryTarget(
+            parent=PARENT,
+            structured_query=query_pb2.StructuredQuery(
+              where=query_pb2.StructuredQuery.Filter(
+                field_filter=query_pb2.StructuredQuery.FieldFilter(
+                  field=query_pb2.StructuredQuery.FieldReference(
+                    field_path="key",
+                  ),
+                  op=query_pb2.StructuredQuery.FieldFilter.Operator.EQUAL,
+                  value=document_pb2.Value(
+                    integer_value=42,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      )
+    ]
+
+    for listen_response in stub.Listen(iter(q)):
+      logging.info("%s", listen_response)
+
+
 def main(argv: Sequence[str]) -> None:
   if len(argv) == 1:
-    raise app.UsageError("no command specified; supported commands are: init ls set:DocN=999")
+    raise app.UsageError("no command specified; supported commands are: init ls set:DocN=999 listen")
   elif len(argv) == 2:
     command_str = argv[1]
   elif len(argv) > 2:
@@ -114,10 +157,20 @@ def main(argv: Sequence[str]) -> None:
     if not match:
       raise app.UsageError(f"invalid set command: {command_str} (expected set:DocId=IntValue)")
     command = UpdateDocumentCommand(document_id=match.group(1), value=int(match.group(2)))
+  elif command_str == "listen":
+    command = ListenCommand()
   else:
     raise app.UsageError(f"unsupported command: {command_str}")
 
-  with grpc.insecure_channel('localhost:8080') as grpc_channel:
+  if FLAG_FIRESTORE_EMULATOR.value:
+    logging.info("Connecting to the Firestore Emulator at localhost:8080")
+    grpc_channel = grpc.insecure_channel("localhost:8080")
+  else:
+    logging.info("Connecting to Firestore Prod at firestore.googleapis.com")
+    channel_creds = grpc.ssl_channel_credentials()
+    grpc_channel = grpc.secure_channel("firestore.googleapis.com", channel_creds)
+
+  with grpc_channel:
     stub = firestore_pb2_grpc.FirestoreStub(grpc_channel)
     command.run(stub)
 
