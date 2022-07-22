@@ -1,12 +1,12 @@
-from collections.abc import Sequence
-
 import abc
+from collections.abc import Sequence
 import grpc
 import queue
 import re
 import socket
 import socketserver
 import threading
+from typing import Optional
 
 from absl import app
 from absl import flags
@@ -133,7 +133,14 @@ class ListenCommand(Command):
         if data == b"pause":
           self.send_listen_request(ListenCommand.remove_target_listen_request())
         elif data == b"resume":
-          self.send_listen_request(ListenCommand.add_target_listen_request())
+          resume_token = self.server.resume_token
+          if not resume_token:
+            self.send_listen_request(ListenCommand.add_target_listen_request())
+          else:
+            self.send_listen_request(ListenCommand.add_target_listen_request(resume_token))
+        elif data.startswith(b"resume:"):
+          resume_token = data[len(b"resume:"):]
+          self.send_listen_request(ListenCommand.add_target_listen_request(resume_token))
         else:
           logging.warning("Received unknown command: %s", data)
 
@@ -145,6 +152,7 @@ class ListenCommand(Command):
       def __init__(self, q: ListenRequestIter):
         super().__init__(("127.0.0.1", 23445), RemoteCommandRequestHandler)
         self.q = q
+        self.resume_token: Optional[bytes] = None
 
       def serve_forever(self, *args, **kwargs):
         logging.info("Listening on %s", self.server_address)
@@ -197,12 +205,30 @@ class ListenCommand(Command):
     for listen_response in stub.Listen(listen_request_iter, metadata=metadata):
       logging.info("Received: ListenResponse:\n%s", listen_response)
 
+      target_change = listen_response.target_change
+      if not target_change:
+        continue
+
+      if target_change.target_change_type != firestore_pb2.TargetChange.TargetChangeType.NO_CHANGE:
+        continue
+
+      if len(target_change.target_ids) > 0:
+        continue
+
+      resume_token = target_change.resume_token
+      if len(resume_token) > 0:
+        logging.info("Updating resume token to: %s", resume_token.hex())
+        remote_command_server.resume_token = resume_token
+
+
+
   @staticmethod
-  def add_target_listen_request() -> firestore_pb2.ListenRequest:
+  def add_target_listen_request(resume_token: Optional[bytes] = None) -> firestore_pb2.ListenRequest:
     return firestore_pb2.ListenRequest(
       database=DATABASE,
       add_target=firestore_pb2.Target(
         target_id=1,
+        resume_token=resume_token,
         query=firestore_pb2.Target.QueryTarget(
           parent=PARENT,
           structured_query=query_pb2.StructuredQuery(
@@ -240,18 +266,22 @@ class ListenCommand(Command):
 
 class ListenSendCommandRPCCommand(Command):
 
-  def __init__(self, command_name: str, command: bytes) -> None:
+  def __init__(self, command_name: str, command: bytes, arg: Optional[bytes] = None) -> None:
     self.command_name = command_name
     self.command = command
+    self.arg = arg
 
   def run(self, stub: firestore_pb2_grpc.FirestoreStub) -> None:
     remote_address = ("127.0.0.1", 23445)
     with socket.socket() as s:
       logging.info("Connecting to %s", remote_address)
       s.connect(remote_address)
-      logging.info("Sending %s command", self.command_name)
-      s.sendall(self.command)
-
+      if self.arg is None:
+        logging.info("Sending %s command", self.command_name)
+        s.sendall(self.command)
+      else:
+        logging.info("Sending %s command with arg: %s", self.command_name, self.arg.hex())
+        s.sendall(self.command + b":" + self.arg)
 
 class ListenPauseCommand(ListenSendCommandRPCCommand):
 
@@ -261,8 +291,8 @@ class ListenPauseCommand(ListenSendCommandRPCCommand):
 
 class ListenResumeCommand(ListenSendCommandRPCCommand):
 
-  def __init__(self) -> None:
-    super().__init__("RESUME", b"resume")
+  def __init__(self, resume_token: Optional[bytes] = None) -> None:
+    super().__init__("RESUME", b"resume", resume_token)
 
 
 def run_command(command: Command) -> None:
@@ -302,6 +332,9 @@ def main(argv: Sequence[str]) -> None:
     command = ListenPauseCommand()
   elif command_str == "resume":
     command = ListenResumeCommand()
+  elif command_str.startswith("resume:"):
+    resume_token = bytes.fromhex(command_str[len("resume:"):])
+    command = ListenResumeCommand(resume_token=resume_token)
   else:
     raise app.UsageError(f"unsupported command: {command_str}")
 
