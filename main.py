@@ -3,6 +3,7 @@ from __future__ import annotations
 import abc
 from collections.abc import Sequence
 import dataclasses
+import io
 import grpc
 import queue
 import re
@@ -143,10 +144,11 @@ class ListenCommand(Command):
       ("x-goog-request-params", DATABASE),
     )
 
-    for listen_response in stub.Listen(state.requests, metadata=metadata):
-      logging.info("Received: ListenResponse:\n%s", listen_response)
+    for response in stub.Listen(state.requests, metadata=metadata):
+      logging.info("RECV %s", ListenCommand.description_from_listen_response(response))
+      logging.debug("Received: ListenResponse:\n%s", response)
 
-      target_change = listen_response.target_change
+      target_change = response.target_change
       if not target_change:
         continue
 
@@ -202,6 +204,53 @@ class ListenCommand(Command):
       remove_target=1,
     )
 
+  @staticmethod
+  def description_from_listen_request(request: firestore_pb2.ListenRequest) -> str:
+    target_change = request.WhichOneof("target_change")
+    if target_change == "add_target":
+      if not request.add_target.resume_token:
+        return f"TARGET_ADD {request.add_target.target_id}"
+      else:
+        return f"TARGET_ADD {request.add_target.target_id} resume_token=" + \
+               request.add_target.resume_token.hex()
+    elif target_change == "remove_target":
+      return f"TARGET_REMOVE {request.remove_target}"
+    else:
+      return f"UNKNOWN target_change: {target_change}"
+
+  @classmethod
+  def description_from_listen_response(cls, response: firestore_pb2.ListenResponse) -> str:
+    response_type = response.WhichOneof("response_type")
+    if response_type == "target_change":
+      return cls.description_from_target_change(response.target_change)
+    else:
+      return f"UNKNOWN response_type: {response_type}"
+
+  @classmethod
+  def description_from_target_change(cls, target_change: firestore_pb2.TargetChange) -> str:
+    target_ids = tuple(str(x) for x in sorted(target_change.target_ids))
+    if target_change.target_change_type == firestore_pb2.TargetChange.TargetChangeType.ADD:
+      if len(target_ids) == 1:
+        return f"TARGET_ADDED: {target_ids[0]}"
+      else:
+        return "TARGETS_ADDED: " + ", ".join(target_ids)
+    elif target_change.target_change_type == firestore_pb2.TargetChange.TargetChangeType.REMOVE:
+      if len(target_ids) == 1:
+        return f"TARGET_REMOVED: {target_ids[0]}"
+      else:
+        return "TARGETS_REMOVED: " + ", ".join(target_ids)
+    elif target_change.target_change_type == firestore_pb2.TargetChange.TargetChangeType.CURRENT:
+      return "CURRENT " + ", ".join(target_ids)
+    elif target_change.target_change_type == firestore_pb2.TargetChange.TargetChangeType.RESET:
+      return "RESET " + ", ".join(target_ids)
+    elif target_change.target_change_type == firestore_pb2.TargetChange.TargetChangeType.NO_CHANGE:
+      if len(target_ids) == 0:
+        return "GLOBAL_SNAPSHOT resume_token=" + target_change.resume_token.hex()
+      else:
+        return "NO_CHANGE " + + ", ".join(target_ids)
+    else:
+      return f"UNKNOWN target_change_type: {target_change.target_change_type}"
+
   class ListenRequestIter:
 
     def __init__(self) -> None:
@@ -212,7 +261,8 @@ class ListenCommand(Command):
 
     def __next__(self) -> firestore_pb2.ListenRequest:
       request = self.queue.get()
-      logging.info("Sending: ListenRequest:\n%s", request)
+      logging.info("SEND %s", ListenCommand.description_from_listen_request(request))
+      logging.debug("Sending: ListenRequest:\n%s", request)
       return request
 
   @dataclasses.dataclass
