@@ -127,6 +127,30 @@ class UpdateDocumentCommand(Command[None]):
     stub.UpdateDocument(request)
 
 
+class CreateDocumentCommand(Command[None]):
+
+  def __init__(self, document_id: str, value: int) -> None:
+    self.document_id = document_id
+    self.value = value
+
+  def run(self, stub: firestore_pb2_grpc.FirestoreStub) -> None:
+    request = firestore_pb2.CreateDocumentRequest(
+      parent=PARENT,
+      collection_id=COLLECTION_ID,
+      document_id=self.document_id,
+      document=document_pb2.Document(
+        fields={
+          "key": document_pb2.Value(
+            integer_value=self.value,
+          ),
+        },
+      ),
+    )
+
+    logging.info("Creating document: %s (setting key=%s)", self.document_id, self.value)
+    stub.CreateDocument(request)
+
+
 class DeleteDocumentCommand(Command[None]):
 
   def __init__(self, document_id: str) -> None:
@@ -468,6 +492,18 @@ def main(argv: Sequence[str]) -> None:
     except ValueError:
       raise app.UsageError(f"invalid integer value specified for set: {value_str}")
     command = UpdateDocumentCommand(document_id=document_id, value=value)
+  elif command_str == "create":
+    if len(remaining_positional_args) == 0:
+      raise app.UsageError("create must be specified the ID of a document.")
+    document_id = remaining_positional_args.pop(0)
+    if len(remaining_positional_args) == 0:
+      raise app.UsageError("create must be specified the integer value.")
+    value_str = remaining_positional_args.pop(0)
+    try:
+      value = int(value_str)
+    except ValueError:
+      raise app.UsageError(f"invalid integer value specified for create: {value_str}")
+    command = CreateDocumentCommand(document_id=document_id, value=value)
   elif command_str == "rm":
     if len(remaining_positional_args) == 0:
       raise app.UsageError("rm must be specified the ID of a document.")
