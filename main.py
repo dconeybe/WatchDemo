@@ -6,11 +6,10 @@ import dataclasses
 import io
 import grpc
 import queue
-import re
 import socket
 import socketserver
 import threading
-from typing import Optional
+from typing import Generic, Optional, TypeVar
 
 from absl import app
 from absl import flags
@@ -40,18 +39,23 @@ DATABASE = "projects/dconeybe-testing/databases/(default)"
 PARENT = f"{DATABASE}/documents"
 COLLECTION_ID = "WatchDemo2"
 
+ResultType = TypeVar('ResultType')
 
-class Command(abc.ABC):
+class Command(Generic[ResultType], abc.ABC):
 
   @abc.abstractmethod
-  def run(self, stub: firestore_pb2_grpc.FirestoreStub) -> None:
+  def run(self, stub: firestore_pb2_grpc.FirestoreStub) -> ResultType:
     raise NotImplementedError
 
 
-class InitializeCommand(Command):
+class InitializeCommand(Command[None]):
 
   def run(self, stub: firestore_pb2_grpc.FirestoreStub) -> None:
-    for i in range(3):
+    existing_document_ids = ListDocumentsCommand().run(stub)
+    for existing_document_id in existing_document_ids:
+      DeleteDocumentCommand(existing_document_id).run(stub)
+
+    for i in range(5):
       request = firestore_pb2.CreateDocumentRequest(
         parent=PARENT,
         collection_id=COLLECTION_ID,
@@ -69,9 +73,9 @@ class InitializeCommand(Command):
       stub.CreateDocument(request)
 
 
-class ListDocumentsCommand(Command):
+class ListDocumentsCommand(Command[list[str]]):
 
-  def run(self, stub: firestore_pb2_grpc.FirestoreStub) -> None:
+  def run(self, stub: firestore_pb2_grpc.FirestoreStub) -> list[str]:
     request = firestore_pb2.ListDocumentsRequest(
       parent=PARENT,
       collection_id=COLLECTION_ID,
@@ -80,20 +84,22 @@ class ListDocumentsCommand(Command):
     logging.info("Listing documents...")
     response = stub.ListDocuments(request)
 
-    count = 0
+    document_names = []
     for document in response.documents:
-      count += 1
+      document_id = document.name.split("/")[-1]
+      document_names.append(document_id)
       logging.info(
         "#%s: %s key=%s",
-        count,
-        document.name,
+        len(document_names),
+        document_id,
         str(document.fields.get("key")).strip()
       )
 
-    logging.info("Found %s documents", count)
+    logging.info("Found %s documents", len(document_names))
+    return document_names
 
 
-class UpdateDocumentCommand(Command):
+class UpdateDocumentCommand(Command[None]):
 
   def __init__(self, document_id: str, value: int) -> None:
     self.document_id = document_id
@@ -120,7 +126,21 @@ class UpdateDocumentCommand(Command):
     logging.info("Updating document: %s (setting key=%s)", self.document_id, self.value)
     stub.UpdateDocument(request)
 
-class ListenCommand(Command):
+
+class DeleteDocumentCommand(Command[None]):
+
+  def __init__(self, document_id: str) -> None:
+    self.document_id = document_id
+
+  def run(self, stub: firestore_pb2_grpc.FirestoreStub) -> None:
+    request = firestore_pb2.DeleteDocumentRequest(
+      name=f"{PARENT}/{COLLECTION_ID}/{self.document_id}",
+    )
+
+    logging.info("Deleting document: %s", self.document_id)
+    stub.DeleteDocument(request)
+
+class ListenCommand(Command[None]):
 
   def __init__(self, resume_token: Optional[bytes]) -> None:
     self.resume_token = resume_token
@@ -374,7 +394,7 @@ class ListenCommand(Command):
       return super().serve_forever(*args, **kwargs)
 
 
-class ListenSendCommandRPCCommand(Command):
+class ListenSendCommandRPCCommand(Command[None]):
 
   def __init__(self, command_name: str, command: bytes, arg: Optional[bytes] = None) -> None:
     self.command_name = command_name
@@ -420,25 +440,39 @@ def run_command(command: Command) -> None:
 
 
 def main(argv: Sequence[str]) -> None:
-  if len(argv) == 1:
-    raise app.UsageError("no command specified; supported commands are: init ls set:DocN=999 listen")
-  elif len(argv) > 2:
-    raise app.UsageError(f"unexpected argument: {argv[2]}")
+  remaining_positional_args = list(argv)
+  del argv
+  remaining_positional_args.pop(0)  # Remove the application name
+
+  if len(remaining_positional_args) == 0:
+    raise app.UsageError("no command specified")
 
   resume_token_str = FLAG_RESUME_TOKEN.value
   resume_token = bytes.fromhex(resume_token_str) if resume_token_str else None
 
-  command_str = argv[1]
+  command_str = remaining_positional_args.pop(0)
   command: Command
   if command_str == "init":
     command = InitializeCommand()
   elif command_str == "ls":
     command = ListDocumentsCommand()
-  elif command_str.startswith("set:"):
-    match = re.fullmatch(r"set:(\w+)=(\d+)", command_str)
-    if not match:
-      raise app.UsageError(f"invalid set command: {command_str} (expected set:DocId=IntValue)")
-    command = UpdateDocumentCommand(document_id=match.group(1), value=int(match.group(2)))
+  elif command_str == "set":
+    if len(remaining_positional_args) == 0:
+      raise app.UsageError("set must be specified the ID of a document.")
+    document_id = remaining_positional_args.pop(0)
+    if len(remaining_positional_args) == 0:
+      raise app.UsageError("set must be specified the integer value.")
+    value_str = remaining_positional_args.pop(0)
+    try:
+      value = int(value_str)
+    except ValueError:
+      raise app.UsageError(f"invalid integer value specified for set: {value_str}")
+    command = UpdateDocumentCommand(document_id=document_id, value=value)
+  elif command_str == "rm":
+    if len(remaining_positional_args) == 0:
+      raise app.UsageError("rm must be specified the ID of a document.")
+    document_id = remaining_positional_args.pop(0)
+    command = DeleteDocumentCommand(document_id=document_id)
   elif command_str == "listen":
     command = ListenCommand(resume_token)
   elif command_str == "pause":
@@ -450,6 +484,9 @@ def main(argv: Sequence[str]) -> None:
     command = ListenResumeCommand(resume_token=resume_token)
   else:
     raise app.UsageError(f"unsupported command: {command_str}")
+
+  if len(remaining_positional_args) > 0:
+    raise app.UsageError(f"unexpected argument: {remaining_positional_args[0]}")
 
   run_command(command)
 
