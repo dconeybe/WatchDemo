@@ -515,9 +515,6 @@ def main(argv: Sequence[str]) -> None:
     command = ListenPauseCommand()
   elif command_str == "resume":
     command = ListenResumeCommand(resume_token)
-  elif command_str.startswith("resume:"):
-    resume_token = bytes.fromhex(command_str[len("resume:"):])
-    command = ListenResumeCommand(resume_token=resume_token)
   else:
     raise app.UsageError(f"unsupported command: {command_str}")
 
