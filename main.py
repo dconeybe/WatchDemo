@@ -59,7 +59,7 @@ class InitializeCommand(Command[None]):
       request = firestore_pb2.CreateDocumentRequest(
         parent=PARENT,
         collection_id=COLLECTION_ID,
-        document_id=f"Doc{i+1}",
+        document_id=f"doc{i+1}",
         document=document_pb2.Document(
           fields={
             "key": document_pb2.Value(
@@ -92,7 +92,7 @@ class ListDocumentsCommand(Command[list[str]]):
         "#%s: %s key=%s",
         len(document_names),
         document_id,
-        str(document.fields.get("key")).strip()
+        ListenCommand.description_from_document(document),
       )
 
     logging.info("Found %s documents", len(document_names))
@@ -190,7 +190,7 @@ class ListenCommand(Command[None]):
     )
 
     for response in stub.Listen(state.requests, metadata=metadata):
-      logging.info("RECV %s", ListenCommand.description_from_listen_response(response))
+      logging.info("<--- %s", ListenCommand.description_from_listen_response(response))
       logging.debug("Received: ListenResponse:\n%s", response)
 
       target_change = response.target_change
@@ -306,9 +306,7 @@ class ListenCommand(Command[None]):
   @classmethod
   def description_from_document_change(cls, document_change: write_pb2.DocumentChange) -> str:
     buf = io.StringIO()
-    buf.write("DOC_CHANGE ")
-    document_name = document_change.document.name.split("/")[-1]
-    buf.write(document_name)
+    buf.write("DOC_CHANGE")
 
     if document_change.target_ids:
       matching_target_ids = tuple(str(x) for x in sorted(document_change.target_ids))
@@ -326,7 +324,38 @@ class ListenCommand(Command[None]):
         buf.write(" removed_target_ids=")
         buf.write(", ".join(removed_target_ids))
 
+    buf.write(" ")
+    buf.write(cls.description_from_document(document_change.document))
+
     return buf.getvalue()
+
+  @classmethod
+  def description_from_document(cls, document: document_pb2.Document) -> str:
+    buf = io.StringIO()
+
+    document_name = document.name.split("/")[-1]
+    buf.write(document_name)
+
+    field_names = tuple(sorted(document.fields))
+    for field_name in field_names:
+      buf.write(" ")
+      buf.write(field_name)
+      buf.write("=")
+      buf.write(cls.description_from_value(document.fields[field_name]))
+
+    return buf.getvalue()
+
+  @classmethod
+  def description_from_value(cls, value: document_pb2.Value) -> str:
+    value_type = value.WhichOneof("value_type")
+    if value_type == "boolean_value":
+      return "True" if value.boolean_value else "False"
+    elif value_type == "integer_value":
+      return str(value.integer_value)
+    elif value_type == "string_value":
+      return str(value.string_value)
+    else:
+      return str(value)
 
   @classmethod
   def description_from_document_delete(cls, document_delete: write_pb2.DocumentDelete) -> str:
@@ -376,7 +405,7 @@ class ListenCommand(Command[None]):
 
     def __next__(self) -> firestore_pb2.ListenRequest:
       request = self.queue.get()
-      logging.info("SEND %s", ListenCommand.description_from_listen_request(request))
+      logging.info("---> %s", ListenCommand.description_from_listen_request(request))
       logging.debug("Sending: ListenRequest:\n%s", request)
       return request
 
