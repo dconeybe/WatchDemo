@@ -88,12 +88,7 @@ class ListDocumentsCommand(Command[list[str]]):
     for document in response.documents:
       document_id = document.name.split("/")[-1]
       document_names.append(document_id)
-      logging.info(
-        "#%s: %s key=%s",
-        len(document_names),
-        document_id,
-        ListenCommand.description_from_document(document),
-      )
+      logging.info("%s", ListenCommand.description_from_document(document))
 
     logging.info("Found %s documents", len(document_names))
     return document_names
