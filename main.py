@@ -292,7 +292,7 @@ class ListenCommand(Command[None]):
       return "RESET " + ", ".join(target_ids)
     elif target_change.target_change_type == firestore_pb2.TargetChange.TargetChangeType.NO_CHANGE:
       if len(target_ids) == 0:
-        return "GLOBAL_SNAPSHOT resume_token=" + target_change.resume_token.hex()
+        return "NO_CHANGE resume_token=" + target_change.resume_token.hex()
       else:
         return "NO_CHANGE " + ", ".join(target_ids)
     else:
