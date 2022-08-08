@@ -545,7 +545,10 @@ def main(argv: Sequence[str]) -> None:
   if len(remaining_positional_args) > 0:
     raise app.UsageError(f"unexpected argument: {remaining_positional_args[0]}")
 
-  run_command(command)
+  try:
+    run_command(command)
+  except KeyboardInterrupt:
+    logging.warning("Application terminated by keyboard interrupt")
 
 
 if __name__ == "__main__":
